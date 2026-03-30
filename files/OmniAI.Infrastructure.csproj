@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>OmniAI.Infrastructure</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.6" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.6" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="8.9.1" />
+    <PackageReference Include="AspNetCore.HealthChecks.SqlServer" Version="8.0.2" />
+    <PackageReference Include="HtmlAgilityPack" Version="1.11.61" />
+    <PackageReference Include="PdfPig" Version="0.1.8" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OmniAI.Domain\OmniAI.Domain.csproj" />
+    <ProjectReference Include="..\OmniAI.Application\OmniAI.Application.csproj" />
+  </ItemGroup>
+</Project>

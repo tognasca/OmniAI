@@ -1,0 +1,36 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.swp
+publish/
+
+## Secrets - NEVER commit these
+.env
+appsettings.Production.json
+appsettings.Staging.json
+**/secrets.json
+
+## Logs
+logs/
+*.log
+
+## Build artifacts
+artifacts/
+out/
+
+## Rider / VS Code
+.idea/
+.vscode/
+*.DotSettings.user
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Test results
+TestResults/
+coverage/
+*.coverage

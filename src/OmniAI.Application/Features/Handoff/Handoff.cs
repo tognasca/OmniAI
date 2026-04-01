@@ -26,6 +26,45 @@ public class GetHandoffTriggersHandler(IOmniDbContext db)
     }
 }
 
+// ✅ Handler adicionado — estava faltando
+public class UpsertHandoffTriggerHandler(IOmniDbContext db)
+    : IRequestHandler<UpsertHandoffTriggerCommand, HandoffTriggerDto>
+{
+    public async Task<HandoffTriggerDto> Handle(
+        UpsertHandoffTriggerCommand req, CancellationToken ct)
+    {
+        HandoffTrigger trigger;
+
+        if (req.Id.HasValue)
+        {
+            trigger = await db.HandoffTriggers.FindAsync([req.Id.Value], ct)
+                ?? throw new InvalidOperationException($"Trigger {req.Id} not found.");
+        }
+        else
+        {
+            trigger = new HandoffTrigger { Id = Guid.NewGuid() };
+            db.HandoffTriggers.Add(trigger);
+        }
+
+        trigger.WhatsAppNumberId = req.WhatsAppNumberId;
+        trigger.TriggerType = req.TriggerType;
+        trigger.Value = req.Value;
+        trigger.Priority = req.Priority;
+        trigger.IsActive = req.IsActive;
+        trigger.TransitionMsg = req.TransitionMsg;
+
+        await db.SaveChangesAsync(ct);
+
+        return new HandoffTriggerDto(
+            trigger.Id,
+            trigger.WhatsAppNumberId,
+            trigger.TriggerType,
+            trigger.Value,
+            trigger.Priority,
+            trigger.IsActive);
+    }
+}
+
 public class DeleteHandoffTriggerHandler(IOmniDbContext db)
     : IRequestHandler<DeleteHandoffTriggerCommand, bool>
 {

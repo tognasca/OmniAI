@@ -12,8 +12,8 @@ using OmniAI.Infrastructure.Persistence;
 namespace OmniAI.Infrastructure.Migrations
 {
     [DbContext(typeof(OmniDbContext))]
-    [Migration("20260330201640_Inicial")]
-    partial class Inicial
+    [Migration("20260330210140_Inicial_INI")]
+    partial class Inicial_INI
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)

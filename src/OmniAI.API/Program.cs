@@ -1,5 +1,8 @@
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using OmniAI.API;
 using OmniAI.API.Hubs;
 using OmniAI.Application;
 using OmniAI.Domain.Entities;
@@ -7,6 +10,8 @@ using OmniAI.Infrastructure;
 using OmniAI.Infrastructure.Persistence;
 using Serilog;
 using Serilog.Events;
+using System.Security.Claims;
+using System.Text.Encodings.Web;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
@@ -56,11 +61,10 @@ try
         });
     });
 
-    // ── MediatR: registra de TODOS os assemblies com handlers ─────
     builder.Services.AddMediatR(cfg =>
     {
-        cfg.RegisterServicesFromAssembly(typeof(IOmniDbContext).Assembly); // Application
-        cfg.RegisterServicesFromAssembly(typeof(Program).Assembly);        // API (fallback)
+        cfg.RegisterServicesFromAssembly(typeof(IOmniDbContext).Assembly);
+        cfg.RegisterServicesFromAssembly(typeof(Program).Assembly);
     });
 
     builder.Services.AddInfrastructure(builder.Configuration);
@@ -74,18 +78,15 @@ try
             p.WithOrigins(origins).AllowAnyMethod().AllowAnyHeader().AllowCredentials()));
 
     var authority = builder.Configuration["Auth:Authority"];
-    var audience = builder.Configuration["Auth:Audience"];
+    var audience  = builder.Configuration["Auth:Audience"];
 
-    // Configuração de autenticação
     if (!string.IsNullOrWhiteSpace(authority) && !string.IsNullOrWhiteSpace(audience))
     {
-        // Produção ou ambiente com autoridade configurada
         builder.Services.AddAuthentication("Bearer")
             .AddJwtBearer("Bearer", options =>
             {
                 options.Authority = authority;
-                options.Audience = audience;
-                // Em desenvolvimento, você pode permitir HTTP; em produção, force HTTPS
+                options.Audience  = audience;
                 options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
             });
 
@@ -94,16 +95,14 @@ try
     }
     else
     {
-        // Ambiente de desenvolvimento ou quando não há autoridade configurada
         Log.Warning("Auth:Authority não configurada — [Authorize] será em modo de DEV");
 
-        builder.Services.AddAuthentication()
-            .AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions, DevAuthHandler>("Dev", o => { });
+        builder.Services.AddAuthentication("Dev")
+            .AddScheme<AuthenticationSchemeOptions, DevAuthHandler>("Dev", _ => { });
 
         builder.Services.AddAuthorization(options =>
         {
-            options.DefaultPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder()
-                .AddAuthenticationSchemes("Dev")
+            options.DefaultPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder("Dev")
                 .RequireAuthenticatedUser()
                 .Build();
         });
@@ -116,7 +115,11 @@ try
     await MigrateWithRetryAsync(app.Services);
 
     app.UseSwagger();
-    app.UseSwaggerUI(c => { c.SwaggerEndpoint("/swagger/v1/swagger.json", "OmniAI v1"); c.RoutePrefix = string.Empty; });
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "OmniAI v1");
+        c.RoutePrefix = string.Empty;
+    });
 
     if (Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") != "true")
         app.UseHttpsRedirection();
@@ -145,13 +148,40 @@ catch (Exception ex) when (ex is not HostAbortedException)
     Log.Fatal(ex, "OmniAI API terminated unexpectedly");
     return 1;
 }
-finally { Log.CloseAndFlush(); }
+finally
+{
+    Log.CloseAndFlush();
+}
 return 0;
 
+// ── DevAuthHandler — bypassa autenticação em ambiente sem Authority ──────────
+//public class DevAuthHandler(
+//    IOptionsMonitor<AuthenticationSchemeOptions> options,
+//    ILoggerFactory logger,
+//    UrlEncoder encoder)
+//    : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
+//{
+//    protected override Task<AuthenticateResult> HandleAuthenticateAsync()
+//    {
+//        var claims = new[]
+//        {
+//            new Claim(ClaimTypes.NameIdentifier, "dev-user-id"),
+//            new Claim(ClaimTypes.Name,           "Dev User"),
+//            new Claim(ClaimTypes.Email,          "dev@omni.local"),
+//            new Claim(ClaimTypes.Role,           "Admin"),
+//        };
+//        var identity = new ClaimsIdentity(claims, Scheme.Name);
+//        var ticket   = new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name);
+//        return Task.FromResult(AuthenticateResult.Success(ticket));
+//    }
+//}
+
+// ── MigrateWithRetryAsync ────────────────────────────────────────────────────
 static async Task MigrateWithRetryAsync(IServiceProvider services)
 {
     const int maxAttempts = 10;
     var delay = TimeSpan.FromSeconds(3);
+
     for (int attempt = 1; attempt <= maxAttempts; attempt++)
     {
         try
@@ -162,19 +192,21 @@ static async Task MigrateWithRetryAsync(IServiceProvider services)
             await db.Database.MigrateAsync();
 
             if (db.Model.FindEntityType(typeof(AppUser)) != null)
-            {
                 await OmniDbSeeder.SeedAuthAsync(db);
-            }
+
             Log.Information("Database ready.");
             return;
         }
         catch (Exception ex) when (attempt < maxAttempts)
         {
-            Log.Warning("Migration attempt {Attempt} failed: {Message}. Retrying in {Delay}s...", attempt, ex.Message, (int)delay.TotalSeconds);
+            Log.Warning("Migration attempt {Attempt} failed: {Message}. Retrying in {Delay}s...",
+                attempt, ex.Message, (int)delay.TotalSeconds);
             await Task.Delay(delay);
             delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 1.5, 30));
         }
     }
+
+    // Última tentativa sem catch — deixa estourar
     using var finalScope = services.CreateScope();
     var finalDb = finalScope.ServiceProvider.GetRequiredService<OmniDbContext>();
     await finalDb.Database.MigrateAsync();

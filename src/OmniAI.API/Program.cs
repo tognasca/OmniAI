@@ -47,6 +47,7 @@ try
     builder.Services.AddEndpointsApiExplorer();
     builder.Services.AddSwaggerGen(c =>
     {
+        c.SwaggerDoc("public-v1", new() { Title = "OmniAI API pública", Version = "v1" });
         c.SwaggerDoc("v1", new() { Title = "OmniAI WhatsApp Manager", Version = "v1" });
         c.AddSecurityDefinition("Bearer", new()
         {
@@ -54,6 +55,13 @@ try
             Scheme = "bearer",
             BearerFormat = "JWT"
         });
+        c.AddSecurityDefinition("IntegrationKey", new()
+        {
+            Type = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey,
+            In = Microsoft.OpenApi.Models.ParameterLocation.Header,
+            Name = "X-Api-Key"
+        });
+        c.OperationFilter<OmniAI.API.PublicApiSecurityDocumentation>();
         c.AddSecurityRequirement(new()
         {
             {
@@ -126,6 +134,7 @@ try
     app.UseSwaggerUI(c =>
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "OmniAI v1");
+        c.SwaggerEndpoint("/swagger/public-v1/swagger.json", "OmniAI API pública");
         c.RoutePrefix = string.Empty;
     });
 

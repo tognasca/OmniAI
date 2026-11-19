@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using OmniAI.Infrastructure.BackgroundWorkers;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace OmniAI.API.Controllers;
@@ -15,13 +18,40 @@ public class WebhookController(IncomingMessageQueue queue, IConfiguration cfg, I
         [FromQuery(Name = "hub.challenge")] string challenge)
     {
         if (mode == "subscribe" && token == cfg["WhatsApp:VerifyToken"])
-            return Ok(challenge);
-        return Forbid();
+            return Content(challenge, "text/plain");
+        return StatusCode(StatusCodes.Status403Forbidden);
     }
 
     [HttpPost]
-    public async Task<IActionResult> Receive([FromBody] MetaWebhookPayload payload)
+    [RequestSizeLimit(1024 * 1024)]
+    public async Task<IActionResult> Receive(CancellationToken ct)
     {
+        var appSecret = cfg["WhatsApp:AppSecret"];
+        if (string.IsNullOrWhiteSpace(appSecret))
+            return StatusCode(StatusCodes.Status503ServiceUnavailable);
+
+        var signature = Request.Headers["X-Hub-Signature-256"].ToString();
+        if (signature.Length != 71 || !signature.StartsWith("sha256=", StringComparison.Ordinal))
+            return Unauthorized();
+
+        byte[] suppliedSignature;
+        try { suppliedSignature = Convert.FromHexString(signature[7..]); }
+        catch (FormatException) { return Unauthorized(); }
+
+        using var buffer = new MemoryStream();
+        await Request.Body.CopyToAsync(buffer, ct);
+        var expectedSignature = HMACSHA256.HashData(Encoding.UTF8.GetBytes(appSecret), buffer.ToArray());
+        if (!CryptographicOperations.FixedTimeEquals(suppliedSignature, expectedSignature))
+            return Unauthorized();
+
+        buffer.Position = 0;
+        MetaWebhookPayload? payload;
+        try { payload = await JsonSerializer.DeserializeAsync<MetaWebhookPayload>(buffer, cancellationToken: ct); }
+        catch (JsonException) { return BadRequest(); }
+
+        if (payload?.Object != "whatsapp_business_account")
+            return BadRequest();
+
         try
         {
             foreach (var entry in payload.Entry ?? [])
@@ -33,11 +63,15 @@ public class WebhookController(IncomingMessageQueue queue, IConfiguration cfg, I
                         var content = msg.Type == "text" ? msg.Text?.Body : $"[{msg.Type}]";
                         await queue.EnqueueAsync(new IncomingMessageJob(
                             change.Value?.Metadata?.PhoneNumberId ?? "",
-                            msg.Id, msg.From, msg.Type, content, msg.Image?.Id));
+                            msg.Id, msg.From, msg.Type, content, msg.Image?.Id), ct);
                     }
                 }
         }
-        catch (Exception ex) { logger.LogError(ex, "Webhook parse error"); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Webhook enqueue failed");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
         return Ok();
     }
 }

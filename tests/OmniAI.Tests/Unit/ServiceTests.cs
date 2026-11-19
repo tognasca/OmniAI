@@ -146,9 +146,9 @@ public class KnowledgeChunkingTests
 
         // Access internal method via reflection for white-box testing
         var method = typeof(OmniAI.Infrastructure.Services.KnowledgeIndexing.KnowledgeIndexingService)
-            .GetMethod("ChunkText", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            .GetMethod("SplitIntoChunks", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
 
-        var chunks = (List<string>?)method?.Invoke(null, [text]);
+        var chunks = (List<string>?)method?.Invoke(null, [text, 500, 50]);
         chunks.Should().NotBeNull();
         chunks!.Count.Should().BeGreaterThan(1);
         chunks.All(c => c.Length > 20).Should().BeTrue();

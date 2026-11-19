@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -21,28 +22,74 @@ public class OpenAiService(
         string userMessage,
         CancellationToken ct = default)
     {
+        return (await CompleteAsync(new AiCompletionRequest(
+            systemPrompt, history.ToList(), userMessage, Model,
+            cfg.GetValue<int?>("OpenAI:MaxTokens") ?? 1000,
+            cfg.GetValue<float?>("OpenAI:Temperature") ?? 0.3f), ct)).Text;
+    }
+
+    public async Task<AiCompletion> CompleteAsync(AiCompletionRequest request, CancellationToken ct = default)
+    {
+        var model = string.IsNullOrWhiteSpace(request.Model) ? Model : request.Model;
+        var maxTokens = Math.Clamp(request.MaxTokens, 1, 4096);
+        var temperature = Math.Clamp(request.Temperature, 0, 1);
+        if (model.StartsWith("claude-", StringComparison.Ordinal))
+            return await CallClaudeAsync(request, model, maxTokens, temperature, ct);
+
         var messages = new List<object>
         {
-            new { role = "system", content = systemPrompt }
+            new { role = "system", content = request.SystemPrompt }
         };
 
-        foreach (var (role, content) in history)
+        foreach (var (role, content) in request.History)
             messages.Add(new { role, content });
 
-        messages.Add(new { role = "user", content = userMessage });
+        messages.Add(new { role = "user", content = request.UserMessage });
 
         var payload = new
         {
-            model = Model,
+            model,
             messages,
-            max_tokens = int.TryParse(cfg["OpenAI:MaxTokens"], out var mt) ? mt : 1000,
-            temperature = double.TryParse(cfg["OpenAI:Temperature"], out var t) ? t : 0.3
+            max_completion_tokens = maxTokens,
+            temperature
         };
 
         var reply = await CallOpenAiAsync<ChatCompletion>(
             "https://api.openai.com/v1/chat/completions", payload, ct);
 
-        return reply?.Choices?.FirstOrDefault()?.Message?.Content ?? "";
+        return new AiCompletion(reply?.Choices?.FirstOrDefault()?.Message?.Content ?? "",
+            reply?.Model ?? model, reply?.Usage?.InputTokens ?? 0, reply?.Usage?.OutputTokens ?? 0);
+    }
+
+    private async Task<AiCompletion> CallClaudeAsync(AiCompletionRequest request, string model,
+        int maxTokens, float temperature, CancellationToken ct)
+    {
+        var key = cfg["Anthropic:ApiKey"];
+        if (string.IsNullOrWhiteSpace(key))
+            throw new InvalidOperationException("Anthropic credentials are not configured.");
+
+        using var post = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages");
+        post.Headers.Add("x-api-key", key);
+        post.Headers.Add("anthropic-version", "2023-06-01");
+        post.Content = System.Net.Http.Json.JsonContent.Create(new
+        {
+            model,
+            system = request.SystemPrompt,
+            messages = request.History.Append(("user", request.UserMessage))
+                .Select(message => new { role = message.Item1, content = message.Item2 }),
+            max_tokens = maxTokens,
+            temperature
+        });
+
+        using var response = await http.SendAsync(post, ct);
+        if (!response.IsSuccessStatusCode)
+            log.LogWarning("Anthropic API returned HTTP {Status}", (int)response.StatusCode);
+        response.EnsureSuccessStatusCode();
+        await using var body = await response.Content.ReadAsStreamAsync(ct);
+        var reply = await JsonSerializer.DeserializeAsync<ClaudeCompletion>(body, new JsonSerializerOptions(JsonSerializerDefaults.Web), ct);
+        return new AiCompletion(string.Concat(reply?.Content?.Where(block => block.Type == "text")
+            .Select(block => block.Text) ?? []), reply?.Model ?? model,
+            reply?.Usage?.InputTokens ?? 0, reply?.Usage?.OutputTokens ?? 0);
     }
 
     public async Task<float[]> GetEmbeddingAsync(string text, CancellationToken ct = default)
@@ -79,19 +126,18 @@ public class OpenAiService(
 
     private async Task<T?> CallOpenAiAsync<T>(string url, object payload, CancellationToken ct)
     {
-        http.DefaultRequestHeaders.Authorization =
-            new AuthenticationHeaderValue("Bearer", ApiKey);
+        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ApiKey);
 
         var json = JsonSerializer.Serialize(payload,
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
+        request.Content = new StringContent(json, Encoding.UTF8, "application/json");
 
-        var response = await http.PostAsync(url, content, ct);
+        using var response = await http.SendAsync(request, ct);
 
         if (!response.IsSuccessStatusCode)
         {
-            var error = await response.Content.ReadAsStringAsync(ct);
-            log.LogError("OpenAI API error {Status}: {Error}", response.StatusCode, error);
+            log.LogWarning("OpenAI API returned HTTP {Status}", (int)response.StatusCode);
             response.EnsureSuccessStatusCode();
         }
 
@@ -100,7 +146,13 @@ public class OpenAiService(
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
     }
 
-    private record ChatCompletion(Choice[]? Choices);
+    private record ChatCompletion(Choice[]? Choices, string? Model, OpenAiUsage? Usage);
+    private record OpenAiUsage([property: JsonPropertyName("prompt_tokens")] int InputTokens,
+        [property: JsonPropertyName("completion_tokens")] int OutputTokens);
+    private record ClaudeCompletion(ClaudeBlock[]? Content, string? Model, ClaudeUsage? Usage);
+    private record ClaudeBlock(string Type, string? Text);
+    private record ClaudeUsage([property: JsonPropertyName("input_tokens")] int InputTokens,
+        [property: JsonPropertyName("output_tokens")] int OutputTokens);
     private record Choice(ChoiceMessage Message);
     private record ChoiceMessage(string Role, string Content);
     private record EmbeddingResponse(EmbeddingData[]? Data);

@@ -97,7 +97,12 @@ public class ProcessIncomingMessageHandler(
             SentAt = DateTime.UtcNow,
         };
         db.Messages.Add(inbound);
+        if (string.Equals(req.MessageType, "text", StringComparison.OrdinalIgnoreCase) &&
+            req.Content?.Trim().ToUpperInvariant() is ("SAIR" or "STOP" or "DESCADASTRAR"))
+            contact.IsBlocked = true;
         await db.SaveChangesAsync(ct);
+        if (contact.IsBlocked)
+            return true;
 
         await notifier.NotifyNewMessageAsync(conversation.Id, req.Content ?? "", SenderType.User);
 
@@ -121,6 +126,8 @@ public class ProcessIncomingMessageHandler(
 
         // ── 7. Check business hours ───────────────────────────────────
         var config = number.Config;
+        if (config is { IsActive: false })
+            return true;
         if (config is { IsActive: true })
         {
             var now = TimeOnly.FromDateTime(DateTime.Now);
@@ -143,7 +150,7 @@ public class ProcessIncomingMessageHandler(
             : [];
 
         var history = await db.Messages
-            .Where(m => m.ConversationId == conversation.Id)
+            .Where(m => m.ConversationId == conversation.Id && m.Id != inbound.Id)
             .OrderByDescending(m => m.SentAt)
             .Take(config?.ContextMessages ?? 10)
             .OrderBy(m => m.SentAt)
@@ -165,8 +172,12 @@ public class ProcessIncomingMessageHandler(
             .ToList();
 
         // ── 9. Call AI ────────────────────────────────────────────────
-        var aiReply = await ai.GetCompletionAsync(
-            systemPrompt, historyTuples, req.Content ?? "", ct);
+        var completion = await ai.CompleteAsync(new AiCompletionRequest(
+            systemPrompt, historyTuples, req.Content ?? "", config?.AiModel ?? "",
+            config?.MaxTokens ?? 1000, config?.Temperature ?? 0.3f), ct);
+        var aiReply = completion.Text;
+        if (string.IsNullOrWhiteSpace(aiReply))
+            return true;
 
         // Check if AI itself suggests handoff
         var aiSuggestsHandoff = await ai.ShouldHandoffAsync(aiReply,
@@ -182,14 +193,14 @@ public class ProcessIncomingMessageHandler(
 
         // ── 10. Send reply and log usage ──────────────────────────────
         await SendReplyAsync(number, req.From, conversation.Id, aiReply,
-            SenderType.Bot, ct);
+            SenderType.Bot, ct, completion, ragChunks.Count);
 
         return true;
     }
 
     private async Task SendReplyAsync(
         WhatsAppNumber number, string to, Guid conversationId,
-        string text, SenderType sender, CancellationToken ct)
+        string text, SenderType sender, CancellationToken ct, AiCompletion? completion = null, int ragCount = 0)
     {
         await whatsApp.SendTextAsync(number.Id, to, text, ct);
 
@@ -204,6 +215,19 @@ public class ProcessIncomingMessageHandler(
             SentAt = DateTime.UtcNow,
         };
         db.Messages.Add(outbound);
+        if (completion is not null)
+        {
+            outbound.PromptTokens = completion.InputTokens;
+            outbound.CompletionTokens = completion.OutputTokens;
+            db.AiUsageLogs.Add(new AiUsageLog
+            {
+                Id = Guid.NewGuid(), MessageId = outbound.Id, WhatsAppNumberId = number.Id,
+                Model = completion.Model, PromptTokens = completion.InputTokens,
+                CompletionTokens = completion.OutputTokens,
+                TotalTokens = completion.InputTokens + completion.OutputTokens,
+                RagUsed = ragCount > 0, RagChunksUsed = ragCount, CreatedAt = DateTime.UtcNow
+            });
+        }
         await db.SaveChangesAsync(ct);
         await notifier.NotifyNewMessageAsync(conversationId, text, sender);
     }

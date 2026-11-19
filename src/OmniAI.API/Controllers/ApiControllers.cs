@@ -1,3 +1,6 @@
+using System.Security.Claims;
+using Microsoft.EntityFrameworkCore;
+using OmniAI.Application;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -77,19 +80,29 @@ public class WhatsAppNumbersController(IMediator mediator) : ControllerBase
 [ApiController]
 [Authorize]
 [Route("api/bot-config")]
-public class BotConfigController(IMediator mediator) : ControllerBase
+public class BotConfigController(IMediator mediator, IOmniDbContext db) : ControllerBase
 {
     [HttpGet("{numberId}")]
     public async Task<ActionResult<BotConfigDto>> Get(Guid numberId, CancellationToken ct = default)
     {
+        if (!await OwnsNumberAsync(numberId, ct)) return NotFound();
         var result = await mediator.Send(new GetBotConfigQuery(numberId), ct);
         return result is null ? NotFound() : Ok(result);
     }
 
     [HttpPut]
+    [Authorize(Roles = "Admin,SuperAdmin")]
     public async Task<ActionResult<BotConfigDto>> Upsert(
         [FromBody] UpsertBotConfigCommand cmd, CancellationToken ct = default)
-        => Ok(await mediator.Send(cmd, ct));
+    {
+        if (!await OwnsNumberAsync(cmd.WhatsAppNumberId, ct)) return NotFound();
+        return Ok(await mediator.Send(cmd, ct));
+    }
+
+    private Task<bool> OwnsNumberAsync(Guid numberId, CancellationToken ct) =>
+        Guid.TryParse(User.FindFirstValue("tenantId"), out var tenantId)
+            ? db.WhatsAppNumbers.AnyAsync(n => n.Id == numberId && n.TenantId == tenantId && n.Tenant.IsActive, ct)
+            : Task.FromResult(false);
 }
 
 // ── Knowledge Base ───────────────────────────────────────────────

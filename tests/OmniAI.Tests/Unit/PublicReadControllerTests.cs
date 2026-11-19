@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using OmniAI.API.Controllers;
+using OmniAI.API;
 using OmniAI.Domain.Entities;
 using OmniAI.Infrastructure.Persistence;
 using Xunit;
@@ -49,7 +50,8 @@ public sealed class PublicReadControllerTests
 
         var context = new DefaultHttpContext();
         context.Request.Headers["X-Api-Key"] = "test." + Secret;
-        var controller = new PublicReadController(db, config) { ControllerContext = new() { HttpContext = context } };
+        using var quota = new PublicApiQuota();
+        var controller = new PublicReadController(db, config, quota) { ControllerContext = new() { HttpContext = context } };
 
         var result = await controller.GetContacts();
         if (allowed)
@@ -63,5 +65,14 @@ public sealed class PublicReadControllerTests
             Assert.Equal(401, Assert.IsType<ObjectResult>(result).StatusCode);
         }
         Assert.Equal("no-store", context.Response.Headers.CacheControl.ToString());
+
+        if (allowed)
+        {
+            config["PublicApi:Keys:test:RequestsPerMinute"] = "1";
+            Assert.IsType<OkObjectResult>(await controller.GetContacts());
+            context.Request.Headers["X-Api-Key"] = "TEST." + Secret;
+            Assert.Equal(429, Assert.IsType<ObjectResult>(await controller.GetContacts()).StatusCode);
+            Assert.True(int.TryParse(context.Response.Headers.RetryAfter.ToString(), out var seconds) && seconds > 0);
+        }
     }
 }

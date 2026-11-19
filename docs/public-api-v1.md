@@ -18,4 +18,6 @@ Swagger: /swagger/public-v1/swagger.json. As listas aceitam offset e limit. Uso 
 curl --fail-with-body -H "X-Api-Key: $OMNI_API_KEY" "$OMNI_API_URL/v1/contacts?limit=20"
 ```
 
-Este incremento não realiza envios. A liberação externa depende de testes de isolamento, limites por chave e homologação do ambiente.
+Este incremento não realiza envios. A liberação externa depende de testes de isolamento, limites distribuídos e homologação do ambiente.
+
+Cada chave aceita 60 requisições por minuto por instância. Ajuste `PublicApi__Keys__<id>__RequestsPerMinute` entre 1 e 6000. O limite é compartilhado entre as rotas por chave. Ao atingir a cota, a API retorna HTTP 429 com `Retry-After`. Para mais de uma réplica, aplique também um limite compartilhado no gateway.

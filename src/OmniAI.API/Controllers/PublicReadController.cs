@@ -5,27 +5,28 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using OmniAI.Application;
 using OmniAI.Domain.Entities;
+using OmniAI.API;
 
 namespace OmniAI.API.Controllers;
 
 [ApiController]
 [Route("v1")]
 [ApiExplorerSettings(GroupName = "public-v1")]
-public sealed class PublicReadController(IOmniDbContext db, IConfiguration config) : ControllerBase
+public sealed class PublicReadController(IOmniDbContext db, IConfiguration config, PublicApiQuota quota) : ControllerBase
 {
     [HttpGet("tenant")]
     public async Task<IActionResult> GetTenant(CancellationToken ct)
     {
-        var tenant = await AuthenticateAsync("tenant:read", ct);
-        return tenant is null ? UnauthorizedKey() : Ok(new { tenant.Id, tenant.Name, tenant.Slug });
+        var (tenant, error) = await AuthenticateAsync("tenant:read", ct);
+        return tenant is null ? error! : Ok(new { tenant.Id, tenant.Name, tenant.Slug });
     }
 
     [HttpGet("contacts")]
     public async Task<IActionResult> GetContacts([FromQuery, Range(0, 100000)] int offset = 0,
         [FromQuery, Range(1, 100)] int limit = 25, CancellationToken ct = default)
     {
-        var tenant = await AuthenticateAsync("contacts:read", ct);
-        if (tenant is null) return UnauthorizedKey();
+        var (tenant, error) = await AuthenticateAsync("contacts:read", ct);
+        if (tenant is null) return error!;
 
         return Ok(await db.Contacts.AsNoTracking()
             .Where(c => c.TenantId == tenant.Id)
@@ -38,8 +39,8 @@ public sealed class PublicReadController(IOmniDbContext db, IConfiguration confi
     public async Task<IActionResult> GetConversations([FromQuery, Range(0, 100000)] int offset = 0,
         [FromQuery, Range(1, 100)] int limit = 25, CancellationToken ct = default)
     {
-        var tenant = await AuthenticateAsync("conversations:read", ct);
-        if (tenant is null) return UnauthorizedKey();
+        var (tenant, error) = await AuthenticateAsync("conversations:read", ct);
+        if (tenant is null) return error!;
 
         return Ok(await db.Conversations.AsNoTracking()
             .Where(c => c.Number.TenantId == tenant.Id && c.Contact.TenantId == tenant.Id)
@@ -53,8 +54,8 @@ public sealed class PublicReadController(IOmniDbContext db, IConfiguration confi
         [FromQuery, Range(0, 100000)] int offset = 0,
         [FromQuery, Range(1, 100)] int limit = 25, CancellationToken ct = default)
     {
-        var tenant = await AuthenticateAsync("messages:read", ct);
-        if (tenant is null) return UnauthorizedKey();
+        var (tenant, error) = await AuthenticateAsync("messages:read", ct);
+        if (tenant is null) return error!;
 
         var conversation = db.Conversations.AsNoTracking().Where(c => c.Id == conversationId &&
             c.Number.TenantId == tenant.Id && c.Contact.TenantId == tenant.Id);
@@ -71,8 +72,8 @@ public sealed class PublicReadController(IOmniDbContext db, IConfiguration confi
     [HttpGet("usage")]
     public async Task<IActionResult> GetUsage(CancellationToken ct)
     {
-        var tenant = await AuthenticateAsync("usage:read", ct);
-        if (tenant is null) return UnauthorizedKey();
+        var (tenant, error) = await AuthenticateAsync("usage:read", ct);
+        if (tenant is null) return error!;
 
         var now = DateTime.UtcNow;
         var start = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -88,20 +89,20 @@ public sealed class PublicReadController(IOmniDbContext db, IConfiguration confi
         return Ok(new { start, end, requests = usage?.Requests ?? 0, tokens = usage?.Tokens ?? 0, aiCostUsd = usage?.CostUsd ?? 0m });
     }
 
-    private async Task<Tenant?> AuthenticateAsync(string scope, CancellationToken ct)
+    private async Task<(Tenant? Tenant, IActionResult? Error)> AuthenticateAsync(string scope, CancellationToken ct)
     {
         Response.Headers.CacheControl = "no-store";
         if (!config.GetValue<bool>("PublicApi:Enabled") ||
             !Request.Headers.TryGetValue("X-Api-Key", out var header) || header.Count != 1)
-            return null;
+            return (null, UnauthorizedKey());
 
         var presented = header[0];
         if (presented is null || presented.Length is < 44 or > 128)
-            return null;
+            return (null, UnauthorizedKey());
 
         var parts = presented.Split('.', 2);
         if (parts.Length != 2 || !IsKeyPart(parts[0], 1, 32) || !IsKeyPart(parts[1], 43, 95))
-            return null;
+            return (null, UnauthorizedKey());
 
         var key = config.GetSection("PublicApi:Keys").GetSection(parts[0]);
         if (!key.GetValue<bool>("Enabled") ||
@@ -111,9 +112,23 @@ public sealed class PublicReadController(IOmniDbContext db, IConfiguration confi
             expiry <= DateTimeOffset.UtcNow ||
             key["Scopes"]?.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains(scope, StringComparer.Ordinal) != true ||
             !MatchesHash(parts[1], key["Sha256"]))
-            return null;
+            return (null, UnauthorizedKey());
 
-        return await db.Tenants.AsNoTracking().SingleOrDefaultAsync(t => t.Id == tenantId && t.IsActive, ct);
+        var requestsPerMinute = key.GetValue<int?>("RequestsPerMinute") ?? 60;
+        if (requestsPerMinute is < 1 or > 6000)
+            return (null, UnauthorizedKey());
+
+        using var lease = quota.Acquire(parts[0], requestsPerMinute);
+        if (!lease.IsAcquired)
+        {
+            if (lease.TryGetMetadata(System.Threading.RateLimiting.MetadataName.RetryAfter, out var retryAfter))
+                Response.Headers.RetryAfter = Math.Max(1, Math.Ceiling(retryAfter.TotalSeconds))
+                    .ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return (null, Problem(statusCode: 429, title: "Limite de requisições atingido"));
+        }
+
+        var tenant = await db.Tenants.AsNoTracking().SingleOrDefaultAsync(t => t.Id == tenantId && t.IsActive, ct);
+        return tenant is null ? (null, UnauthorizedKey()) : (tenant, null);
     }
 
     private static bool IsKeyPart(string value, int min, int max) =>

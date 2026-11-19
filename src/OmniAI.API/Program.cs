@@ -39,6 +39,7 @@ try
         .PersistKeysToFileSystem(new DirectoryInfo(keysPath))
         .SetApplicationName("OmniAI");
 
+    builder.Services.AddSingleton<OmniAI.API.PublicApiQuota>();
     builder.Services.AddControllers()
         .AddJsonOptions(o =>
             o.JsonSerializerOptions.DefaultIgnoreCondition =

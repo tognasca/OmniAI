@@ -61,6 +61,9 @@ try
             In = Microsoft.OpenApi.Models.ParameterLocation.Header,
             Name = "X-Api-Key"
         });
+        c.DocInclusionPredicate((document, endpoint) => document == "public-v1"
+            ? endpoint.GroupName == "public-v1"
+            : endpoint.GroupName is null || endpoint.GroupName == document);
         c.OperationFilter<OmniAI.API.PublicApiSecurityDocumentation>();
         c.AddSecurityRequirement(new()
         {

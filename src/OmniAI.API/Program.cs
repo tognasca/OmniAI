@@ -11,7 +11,9 @@ using OmniAI.Infrastructure.Persistence;
 using Serilog;
 using Serilog.Events;
 using System.Security.Claims;
-using System.Text.Encodings.Web;
+using System.Text;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
@@ -77,36 +79,36 @@ try
         opt.AddDefaultPolicy(p =>
             p.WithOrigins(origins).AllowAnyMethod().AllowAnyHeader().AllowCredentials()));
 
-    var authority = builder.Configuration["Auth:Authority"];
-    var audience  = builder.Configuration["Auth:Audience"];
+    var signingKey = builder.Configuration["Jwt:Key"];
+    if (string.IsNullOrWhiteSpace(signingKey) || Encoding.UTF8.GetByteCount(signingKey) < 32 ||
+        signingKey.StartsWith("omni-ai-dev-", StringComparison.Ordinal))
+        throw new InvalidOperationException("Configure Jwt:Key with a unique secret of at least 32 bytes.");
 
-    if (!string.IsNullOrWhiteSpace(authority) && !string.IsNullOrWhiteSpace(audience))
+    builder.Services.AddAuthentication("Bearer").AddJwtBearer("Bearer", options =>
     {
-        builder.Services.AddAuthentication("Bearer")
-            .AddJwtBearer("Bearer", options =>
-            {
-                options.Authority = authority;
-                options.Audience  = audience;
-                options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
-            });
-
-        builder.Services.AddAuthorization();
-        Log.Information("Autenticação configurada com Authority: {Authority}", authority);
-    }
-    else
-    {
-        Log.Warning("Auth:Authority não configurada — [Authorize] será em modo de DEV");
-
-        builder.Services.AddAuthentication("Dev")
-            .AddScheme<AuthenticationSchemeOptions, DevAuthHandler>("Dev", _ => { });
-
-        builder.Services.AddAuthorization(options =>
+        options.TokenValidationParameters = new TokenValidationParameters
         {
-            options.DefaultPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder("Dev")
-                .RequireAuthenticatedUser()
-                .Build();
-        });
-    }
+            ValidateIssuer = true,
+            ValidIssuer = builder.Configuration["Jwt:Issuer"] ?? "OmniAI",
+            ValidateAudience = true,
+            ValidAudience = "omni-ai-app",
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey)),
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromMinutes(1)
+        };
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                if (context.Request.Path == "/hubs/dashboard" &&
+                    context.HttpContext.WebSockets.IsWebSocketRequest)
+                    context.Token = context.Request.Query["access_token"];
+                return Task.CompletedTask;
+            }
+        };
+    });
+    builder.Services.AddAuthorization();
 
     builder.Services.AddHealthChecks()
         .AddSqlServer(builder.Configuration.GetConnectionString("Default")!, name: "sqlserver");
@@ -133,10 +135,11 @@ try
                 ? LogEventLevel.Verbose : LogEventLevel.Information;
     });
 
+    app.UseWebSockets();
     app.UseAuthentication();
     app.UseAuthorization();
     app.MapControllers();
-    app.MapHub<DashboardHub>("/hubs/dashboard");
+    app.MapHub<DashboardHub>("/hubs/dashboard", options => options.CloseOnAuthenticationExpiration = true).RequireAuthorization();
     app.MapHealthChecks("/health");
     app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
 
@@ -154,28 +157,6 @@ finally
 }
 return 0;
 
-// ── DevAuthHandler — bypassa autenticação em ambiente sem Authority ──────────
-//public class DevAuthHandler(
-//    IOptionsMonitor<AuthenticationSchemeOptions> options,
-//    ILoggerFactory logger,
-//    UrlEncoder encoder)
-//    : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
-//{
-//    protected override Task<AuthenticateResult> HandleAuthenticateAsync()
-//    {
-//        var claims = new[]
-//        {
-//            new Claim(ClaimTypes.NameIdentifier, "dev-user-id"),
-//            new Claim(ClaimTypes.Name,           "Dev User"),
-//            new Claim(ClaimTypes.Email,          "dev@omni.local"),
-//            new Claim(ClaimTypes.Role,           "Admin"),
-//        };
-//        var identity = new ClaimsIdentity(claims, Scheme.Name);
-//        var ticket   = new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name);
-//        return Task.FromResult(AuthenticateResult.Success(ticket));
-//    }
-//}
-
 // ── MigrateWithRetryAsync ────────────────────────────────────────────────────
 static async Task MigrateWithRetryAsync(IServiceProvider services)
 {
@@ -191,8 +172,6 @@ static async Task MigrateWithRetryAsync(IServiceProvider services)
             Log.Information("Migration attempt {Attempt}/{Max}...", attempt, maxAttempts);
             await db.Database.MigrateAsync();
 
-            if (db.Model.FindEntityType(typeof(AppUser)) != null)
-                await OmniDbSeeder.SeedAuthAsync(db);
 
             Log.Information("Database ready.");
             return;
@@ -210,5 +189,4 @@ static async Task MigrateWithRetryAsync(IServiceProvider services)
     using var finalScope = services.CreateScope();
     var finalDb = finalScope.ServiceProvider.GetRequiredService<OmniDbContext>();
     await finalDb.Database.MigrateAsync();
-    await OmniDbSeeder.SeedAuthAsync(finalDb);
 }

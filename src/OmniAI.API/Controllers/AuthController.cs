@@ -23,7 +23,7 @@ public class AuthController(IOmniDbContext db, IConfiguration cfg) : ControllerB
     {
         var user = await db.AppUsers
             .Include(u => u.Tenant)
-            .FirstOrDefaultAsync(u => u.Email == req.Email.ToLower() && u.IsActive, ct);
+            .FirstOrDefaultAsync(u => u.Email == req.Email.ToLower() && u.IsActive && u.Tenant.IsActive, ct);
 
         if (user is null || !AppUser.VerifyPassword(req.Password, user.PasswordHash))
             return Unauthorized(new { error = "Email ou senha inválidos." });
@@ -58,7 +58,7 @@ public class AuthController(IOmniDbContext db, IConfiguration cfg) : ControllerB
             .Include(r => r.User).ThenInclude(u => u.Tenant)
             .FirstOrDefaultAsync(r => r.Token == req.RefreshToken && !r.IsRevoked, ct);
 
-        if (stored is null || stored.ExpiresAt < DateTime.UtcNow)
+        if (stored is null || stored.ExpiresAt < DateTime.UtcNow || !stored.User.IsActive || !stored.User.Tenant.IsActive)
             return Unauthorized(new { error = "Token inválido ou expirado." });
 
         stored.IsRevoked = true;
@@ -160,6 +160,9 @@ public class AuthController(IOmniDbContext db, IConfiguration cfg) : ControllerB
     [Authorize(Roles = "Admin,SuperAdmin")]
     public async Task<IActionResult> AddUser([FromBody] AddUserRequest req, CancellationToken ct)
     {
+        if (req.Role is not (null or "Agent" or "Admin"))
+            return BadRequest(new { error = "Perfil inválido para esta operação." });
+
         var callerTenantId = Guid.Parse(User.FindFirstValue("tenantId")!);
 
         if (await db.AppUsers.AnyAsync(u => u.Email == req.Email.ToLower() && u.TenantId == callerTenantId, ct))
@@ -208,7 +211,7 @@ public class AuthController(IOmniDbContext db, IConfiguration cfg) : ControllerB
     // ── Helpers ───────────────────────────────────────────────────
     private (string AccessToken, string RefreshToken) GenerateTokens(AppUser user)
     {
-        var key = cfg["Jwt:Key"] ?? "omni-ai-dev-secret-key-change-in-production-32chars";
+        var key = cfg["Jwt:Key"] ?? throw new InvalidOperationException("Jwt:Key is required.");
         var issuer = cfg["Jwt:Issuer"] ?? "OmniAI";
         var secKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key));
         var creds = new SigningCredentials(secKey, SecurityAlgorithms.HmacSha256);

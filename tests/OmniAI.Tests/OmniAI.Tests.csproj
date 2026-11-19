@@ -19,6 +19,7 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="8.0.6" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\src\OmniAI.API\OmniAI.API.csproj" />
     <ProjectReference Include="..\..\src\OmniAI.Application\OmniAI.Application.csproj" />
     <ProjectReference Include="..\..\src\OmniAI.Infrastructure\OmniAI.Infrastructure.csproj" />
   </ItemGroup>

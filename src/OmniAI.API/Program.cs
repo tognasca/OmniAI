@@ -70,6 +70,12 @@ try
     });
 
     builder.Services.AddInfrastructure(builder.Configuration);
+    builder.Services.AddHttpClient<OmniAI.API.WhatsApp.MetaSignupClient>(client =>
+    {
+        client.Timeout = TimeSpan.FromSeconds(10);
+    })
+    .RemoveAllLoggers()
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
     builder.Services.AddSignalR();
     builder.Services.AddScoped<IDashboardNotifier, SignalRDashboardNotifier>();
 
